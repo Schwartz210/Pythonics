@@ -1,0 +1,49 @@
+from time import gmtime, strftime
+from sqlite3 import connect
+
+DATABASE = 'log.db'
+TABLE = 'events'
+
+def commit_to_db(event_record):
+    '''
+    Commits record to SQL database
+    '''
+    SQL_request = 'INSERT INTO {} VALUES(NULL, "{}","{}","{}")'.format(TABLE, event_record[0],event_record[1],event_record[2])
+    conn = connect(DATABASE)
+    c = conn.cursor()
+    c.execute(SQL_request)
+    conn.commit()
+    conn.close()
+
+def logger(func):
+    '''
+    Decorator called to log which function was called, which args were passed in, and the timestamp
+    '''
+    def sub_func(*args, **kwargs):
+        timestamp = strftime("%Y-%m-%d %H:%M:%S", gmtime())
+        name = func.__name__
+        if len(args) > 0 and len(kwargs) > 0:
+            my_args = 'args={}'.format(args)
+            my_kwargs = 'kwargs={}'.format(kwargs)
+            all_my_args = my_args + ', ' + my_kwargs
+            commit_to_db([timestamp, name, all_my_args])
+        elif len(kwargs) > 0:
+            my_kwargs = 'kwargs={}'.format(kwargs)
+            commit_to_db([timestamp, name, my_kwargs])
+        else:
+            my_args = 'args={}'.format(args)
+            commit_to_db([timestamp, name, my_args])
+    return sub_func
+
+def print_log():
+    '''
+    Prints entire log to console
+    '''
+    conn = connect(DATABASE)
+    c = conn.cursor()
+    SQL_request = 'SELECT * FROM {}'.format(TABLE)
+    data = c.execute(SQL_request)
+    for record in data:
+        print(record)
+    conn.commit()
+    conn.close()
