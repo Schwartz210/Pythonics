@@ -1,7 +1,7 @@
 import PyPDF2
 from spreadsheet import open_file
-from folder_contents import amex_filepath, amex_dict
-
+from folder_contents import amex_filepath
+from logger import logger
 
 class PDFHandler(object):
     '''
@@ -14,13 +14,14 @@ class PDFHandler(object):
         self.accts = self.get_unique_accts()
         self.refnum_acct_combos = self.get_refnum_acct_combos()
         self.accts_to_pages = self.create_accts_to_pages_dict()
+        self.pdf_container()
 
     def amex_refnum_pull(self):
         '''
         This function returns a list of refnums and accounts from the Amex Excel workbook.
         '''
         filepath = amex_filepath(self.amex) + '.xlsm'
-        file = open_file(filepath,0,500)
+        file = open_file(filepath,0,1000)
         new_list = []
         for row in file[1:]:
             new_record = [row[0],row[3]]
@@ -63,8 +64,10 @@ class PDFHandler(object):
 
     def create_reader(self):
         filepath = amex_filepath(self.amex) + '.pdf'
-        print filepath
-        pdfFileObj = open(filepath, 'rb')
+        try:
+            pdfFileObj = open(filepath, 'rb')
+        except:
+            raise Exception('Open Foxit, then print to PDF using "PDFCreator". Make sure the file is saved in the correct directory.')
         return pdfFileObj
 
     def writer(self, pdfReader, key, dict):
@@ -75,12 +78,15 @@ class PDFHandler(object):
         pdfWriter.addPage(coversheet)
         pages = dict[key]
         for page in pages:
+            if '.' in page:
+                raise Exception('One of the reference numbers does not correspond to the expected pattern. Ref numbers '
+                                'are supposed to have two digits passed the decimal, this one has fewer.')
             try:
                 pageObj = pdfReader.getPage(int(page)-1)
             except:
                 raise Exception('The file is fucked up, not the code. Open Foxit, then print to PDF using "PDFCreator".')
             pdfWriter.addPage(pageObj)
-        pdfOutputFile = open(r'H:\e\amex ' + key + '.pdf', 'wb')
+        pdfOutputFile = open(r'H:\f\amex ' + key + '.pdf', 'wb')
         print key
         pdfWriter.write(pdfOutputFile)
         pdfOutputFile.close()
@@ -94,5 +100,6 @@ class PDFHandler(object):
 
 
 
-this_amex = PDFHandler('C062816')
-this_amex.pdf_container()
+@logger
+def run_pdf_handler(amex):
+    PDFHandler(amex)

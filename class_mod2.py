@@ -1,12 +1,12 @@
 __author__ = 'aschwartz - Schwartz210@gmail.com'
 from spreadsheet import invoice_pull, check_request_pull
-from mydatabases import clients, jobs, cc_accts, names, general_ledger, addresses
+from sql_time import pull_data, exists
 from super_transaction import SuperTransaction
 from pyautogui import *
 from time import sleep
 from datetime import datetime
 from folder_contents import folder_dict
-
+from subjobs import subjob_builder
 
 
 class TransactionSegment(SuperTransaction):
@@ -18,6 +18,7 @@ class TransactionSegment(SuperTransaction):
     In accounting terms, this class is used to represent both the debit/credit side, and all associated details.
     '''
     def __init__(self, packet):
+        SuperTransaction.__init__(self)
         self.source = ''
         self.type_info = packet[0]
         self.job_in = self.str_format(packet[1])
@@ -33,17 +34,26 @@ class TransactionSegment(SuperTransaction):
         self.link = self.create_link(self.directory, self.doc_name)
 
     def find_location(self):
-        for record in jobs:
-            if self.str_format(record[0]) == self.job_in:
-                return str(record[3])
+        sql_request = 'SELECT location FROM jobs WHERE number="%s"' % (self.job_in)
+        data = pull_data(sql_request)
+        try:
+            return data[0][0]
+        except:
+            subjob_builder([self.job_in])
+            return None
 
     def find_program_date(self):
-        for record in jobs:
-            if self.str_format(record[0]) == self.job_in:
-                return self.format_date(record[2])
+        sql_request = 'SELECT date FROM jobs WHERE number="%s"' % (self.job_in)
+        if exists(sql_request):
+            data = pull_data(sql_request)
+            return data[0][0]
+        else:
+            return None
 
     def bold(self, string):
-        #Makes string bold
+        '''
+        Makes string bold
+        '''
         return '\033[1m' + string + '\033[0m'
 
     def clean_ref_num(self, raw_ref_num):
@@ -68,7 +78,7 @@ class TransactionSegment(SuperTransaction):
         '''
         snip = folder_dict['payables']
         snip = snip.strip('S:')
-        start = r'\\nas01\shared'
+        start = r'\\crgnas01\shared'
         return start + snip
 
 class LineItem(TransactionSegment):
@@ -78,6 +88,8 @@ class LineItem(TransactionSegment):
     '''
     def __init__(self, packet):
         TransactionSegment.__init__(self,packet)
+        if not self.gl_in:
+            self.gl_in = self.override_gl_in()
         self.vendor_obj = self.create_vendor_obj()
         self.full_job = self.find_full_job_name(self.job_in)
         self.short_job = self.find_short_job(self.job_in)
@@ -93,11 +105,17 @@ class LineItem(TransactionSegment):
         '''
         This method returns a string that becomes the memo line of a line item.
         '''
-        if self.vendor_obj:
+        try:
             loc = self.find_location()
+        except:
+            return None
+        if type(self.vendor_obj) == str:
+            print(self.vendor_name)
+            raise Exception('Vendor object not formed. Update vendor address report')
+        try:
             return self.vendor_obj.first_name + ' ' + self.vendor_obj.last_name + ' - ' + self.comments + ' - ' + str(loc) + ' - ' + str(self.program_date)
-        else:
-            return 'ERROR'
+        except:
+            return None
 
     def create_trans_class(self):
         '''
@@ -129,21 +147,15 @@ class LineItem(TransactionSegment):
             typewrite(self.job_out)
             press('tab')
         sleep(1)
-        quick = locateOnScreen('img/quick.png')
-        quick2 = locateOnScreen('img/quick2.png')
-        if quick or quick2:
-            press('q')
+        press('q')
+        sleep(.5)
+        press('backspace')
         sleep(1.5)
         press('tab')
         if self.tran_class:
             typewrite(self.tran_class)
         sleep(1)
         press('tab')
-        sleep(1.5)
-        quick = locateOnScreen('img/quick.png')
-        quick2 = locateOnScreen('img/quick2.png')
-        if quick or quick2:
-            press('q')
         sleep(1.5)
 
     def __str__(self):
@@ -153,18 +165,6 @@ class LineItem(TransactionSegment):
         print self.bold('Memo          : ') + ' %s' % (self.memo)
         print self.bold('Job           : ') + ' %s' % (self.job_out)
         print self.bold('Class         : ') + ' %s' % (self.tran_class)
-
-
-class LineItemChk(LineItem):
-    '''
-    This class is a type of line item. It only contains a method override for a string format.
-    '''
-    def __init__(self, packet):
-        LineItem.__init__(self, packet)
-        self.gl_in = self.override_gl_in()
-        self.job_out = self.create_job_out(self.full_job, self.gl_in)
-        self.gl_out = self.create_gl_out(self.gl_in, self.client)
-        self.tabulate_box = [self.gl_out,str(self.amount),self.memo,self.job_out]
 
     def override_gl_in(self):
         '''
@@ -188,8 +188,21 @@ class LineItemChk(LineItem):
                         'Train' : 'Ground',
                         'Fuel' : 'Ground',
                         'Ground' : 'Ground',
-                        'Production' : 'Production'}
+                        'Production' : 'Production',
+                        'Per Diem' : 'Per Diem'}
         return comments_dict[self.comments]
+
+class LineItemChk(LineItem):
+    '''
+    This class is a type of line item. It only contains a method override for a string format.
+    '''
+    def __init__(self, packet):
+        LineItem.__init__(self, packet)
+        self.job_out = self.create_job_out(self.full_job, self.gl_in)
+        self.gl_out = self.create_gl_out(self.gl_in, self.client)
+        self.tabulate_box = [self.gl_out,str(self.amount),self.memo,self.job_out,self.tran_class]
+
+
 
 
 class LineItemInv(LineItem):
@@ -313,20 +326,25 @@ class CheckRequest(ContainerTransaction):
         self.qb_date = self.create_qb_date()
         self.tabulate_box = [self.vendor_name, self.qb_date, self.memo,str(self.amount)]
 
-    def create_memo(self):
-        '''
-        String formatting for the 'memo' field.
-        '''
+    def get_checktype(self):
         if self.comments == 'Fee For Service':
             checktype = 'Fee For Service'
         else:
             checktype = 'Expenses'
+        return checktype
 
+    def create_memo(self):
+        '''
+        String formatting for the 'memo' field.
+        '''
+        checktype = self.get_checktype()
         if not self.vendor_obj.last_name:
+            print(self.vendor_obj.vendor)
             raise Exception('Try running a Vendor Address report from QuickBooks.')
         name = self.vendor_obj.last_name
-
-
+        doctor_credentials = ['MD', 'PhD']
+        if self.vendor_obj.salutation in doctor_credentials:
+            name = 'Dr. ' + name
         location = self.find_location()
         program_date = self.find_program_date()
         memo = name + ' - ' + checktype + ' - ' + str(location) + ' - ' + str(program_date)
@@ -363,6 +381,12 @@ class CheckRequest(ContainerTransaction):
             line_item.QB()
         press('tab')
         press('tab')
+        count = 17 - len(self.line_items)
+        if count < 1:
+            count = 1
+        for _ in range(count):
+            press('down')
+            sleep(.25)
         typewrite(self.link)
         sleep(3)
         hotkey('alt','s')
@@ -376,3 +400,12 @@ class CheckRequest(ContainerTransaction):
 
 
 
+def factory(desired_quantity, some_class):
+    '''
+    Make lots of some_class
+    '''
+    inventory = []
+    for _ in range(desired_quantity):
+        thing = some_class()
+        inventory.append(thing)
+    return inventory

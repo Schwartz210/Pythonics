@@ -1,16 +1,17 @@
-__author__ = 'aschwartz - Schwartz210@gmail.com'
-from spreadsheet import open_file, screen_out_col, screen_out_empty_rows
+from spreadsheet import open_file, screen_out_col, screen_out_empty_rows, format_one_job_number, format_date
 from super_transaction import SuperTransaction, QUICKBOOKS_CLOSING_DATE
 from csv import writer, QUOTE_MINIMAL
 from window import SingleSelectionWindow, MultiSelectionWindow
-from folder_contents import amex_dict, amex_support, open_file2
+from folder_contents import amex_support, get_folder_contents, clean, amex_filepath
 from QBnames import main_inputter_subroutine
 from startup import Startup
 from time import sleep
 from pyautogui import typewrite, press, hotkey
-from mydatabases import clients, jobs, cc_accts, names, general_ledger, addresses
-
-
+from transplitr import transplitr, split_based_on_jobs, split_based_on_GLs
+from sql_time import pull_data
+from attendee_report import get_line_items_from_attendee_reports
+from logger import logger
+__author__ = 'aschwartz - Schwartz210@gmail.com'
 
 class IIFTransaction(SuperTransaction):
     def __init__(self):
@@ -27,16 +28,19 @@ class IIFTransaction(SuperTransaction):
             return 'CCARD REFUND'
 
     def cc_acct(self):
-        for record in cc_accts:
-            if record[0] == self.account:
-                return record[1]
+        sql_request = 'SELECT full FROM cc_accts WHERE short="%s"' % (self.account)
+        data = pull_data(sql_request)
+        try:
+            return data[0][0]
+        except:
+            raise Exception('CC Acct error: ', sql_request)
 
     def create_memo(self):
         '''
         String formatting for memo field.
         '''
         memo = self.vendor + ' - ' + self.gl_in
-        optional_fields = [self.person_full_name, self.comments, str(self.CDate)]
+        optional_fields = [self.person_full_name, self.comments, self.CDate]
         for field in optional_fields:
             if field:
                 memo += ' - ' + field
@@ -65,48 +69,36 @@ class IIFTransaction(SuperTransaction):
         directory = amex_support(amex)
         return directory
 
-    def find_file_type(self):
+    def get_line_items(self):
         '''
-        This method runs inside self.split_handler. It's purpose is to return the file type.
+        Returns line_items based on split_type. This may involve pulling data from separate spreadsheets, tabs on the-
+        same spreadsheet, job or GL cues listed in the split field (Column O).
         '''
-        if self.split.find('.xlsm') > 0:
-            return 'xlsm'
-        elif self.split.find('.xls') > 0:
-            return 'xls'
-        elif self.split.find('*') == 0:
-            return '*'
+        if self.CDate:
+            date = self.CDate
+        else:
+            date = self.amex_date
+        if self.split.find('XLSX:') > -1:
+            return get_line_items_from_attendee_reports(self.create_link(self.directory, self.split[5:]))
+        elif self.split.find('XLS:') > -1:
+            return self.split_pull(self.create_link(self.directory, self.split[4:]))
+        elif self.split.find('Tab:') > -1:
+            return transplitr(self.amex, self.split[4:], self.amount, self.vendor)
+        elif self.split.find('Jobs:') > -1:
+            return split_based_on_jobs(self.vendor, self.gl_in, self.split, self.person_full_name, self.amount, date, self.comments)
+        elif self.split.find('GLS:') > -1:
+            return split_based_on_GLs(self.vendor, self.split, self.person_full_name, self.amount, date, self.comments)
+        else:
+            raise Exception('No split_type recognized: ', self.split)
 
-    def split_pull(self, database, filetype):
-        '''
-        This function pulls line items from spreadsheets that contain transaction line items.
-        '''
-        file_dict = {'xls' : [0,0], 'xlsm' : [1,8]}
-        file_read_parameters = file_dict[filetype]
-        tab = file_read_parameters[0]
-        start_column = file_read_parameters[1]
-        end_column = start_column + 5
-        data = open_file(database,tab,200)
-        data = screen_out_col(data, start_column, end_column)
-        output_data = screen_out_empty_rows(data)
-        del output_data[0]
-        for row in output_data:
-            if row[4] == 0:
-                row[4] = ''
-        return output_data
 
     def split_handler(self):
         '''
         This method is triggered during the self.create_iff() process for those items with splits. Splits are-
-        transactions with more than one line items. Split data is stored on other spreadsheets.
+        transactions with more than one line items. Split data can be stored on other spreadsheets.
         This methods pulls are converts this data into IIF format.
         '''
-        filetype = self.find_file_type()
-        print self.split
-        database = self.create_link(self.directory, self.split)
-        if filetype == 'xlsm' or filetype == 'xls':
-            line_items = self.split_pull(database, filetype)
-        elif filetype == '*':
-            raise Exception('Under contruction')
+        line_items = self.get_line_items()
         output_list = []
         self.split_gl_out = set()
         self.split_job_out = set()
@@ -117,6 +109,21 @@ class IIFTransaction(SuperTransaction):
             self.split_job_out.add(line_item[3])
         return output_list
 
+    def split_pull(self, database):
+        '''
+        This function pulls line items from spreadsheets that contain transaction line items.
+        '''
+        tab = 0
+        start_column = 0
+        end_column = start_column + 5
+        data = open_file(database,tab,200)
+        data = screen_out_col(data, start_column, end_column)
+        output_data = screen_out_empty_rows(data)
+        del output_data[0]
+        for row in output_data:
+            if row[4] == 0:
+                row[4] = ''
+        return output_data
 
 class Factory(object):
     '''
@@ -136,7 +143,17 @@ class Factory(object):
         sleep(3)
         hotkey('ctrl','o')                #'Open' file dialogue
         sleep(1)
-        typewrite(self.output_filename)   #types file name
+        press('right')
+        for _ in range(3):
+            press('down')
+            sleep(.25)
+        press('esc')
+        for _ in range(5):
+            press('down')
+        sleep(1)
+        press('enter')
+        sleep(1)
+        typewrite('H:\Amex.iif')   #types file name
         press('enter')
         sleep(1)
         press('d')                        #selects 'Delimited' option
@@ -156,7 +173,6 @@ class Factory(object):
         sleep(1)
 
 
-
 class PayrollLine(IIFTransaction):
     '''
     This class represent individual lines items in the payroll allocation report. It serves to produce a single row-
@@ -165,7 +181,7 @@ class PayrollLine(IIFTransaction):
     def __init__(self, packet):
         self.job_in = packet[0]
         self.client_ver = packet[1]
-        self.amount = packet[2]
+        self.amount = packet[1]
         self.gl_in = 'Labor'
         self.full_job = self.find_full_job_name(self.job_in)
         self.job_out = self.create_job_out(self.full_job, self.gl_in)
@@ -190,30 +206,30 @@ class PayrollFactory(Factory):
     '''
     def __init__(self):
         self.data = self.payroll_pull()
-        self.memo = 'Job Labor - December 2015'
-        self.DOCNUM = 'PR 12/15'
-        self.date = '12/30/2015'
+        self.memo = 'Job Labor - December 2016'
+        self.DOCNUM = 'PR 12/16'
+        self.date = '12/31/2016'
         self.gl_out = 'Payroll Allocation of Job Labor'
-        self.output_filename = r"C:\Payroll Allocation Dec 2015.iif"
+        self.output_filename = r"H:\Amex.iif"
         self.line_items = self.factory_method()
         self.modify_line_items()
         self.amount = self.get_total()
         self.iff_info = self.create_iif_rows()
         self.__str__()
         self.publish()
-        self.text_to_columns()
+        #self.text_to_columns()
 
     def payroll_pull(self):
         '''
         Pulls data from payroll file. Returns list.
         '''
-        filepath = 'C:\Internal Files\Financial Files\Payroll allocation\Source files\LaborEntryDec2015.xlsx'
+        filepath = 'S:\CRG Internal Files\Financial Files\Payroll allocation\Source files\DecemberLabor.xlsx'
         data = open_file(filepath, 0, 100)
-        del data[:9]
+        del data[:10]
         processed_data = []
         for row in data:
             if row[0] != '':
-                new_row = [row[0],row[1],row[20]]
+                new_row = [format_one_job_number(row[0]),row[8]]
                 processed_data.append(new_row)
         return processed_data
 
@@ -278,7 +294,7 @@ class PayrollFactory(Factory):
 
 
 class AmexTransaction(IIFTransaction):
-    def __init__(self, packet):
+    def __init__(self, packet, amex):
         self.account = packet[0]
         self.vendor = packet[1]
         self.amex_date = self.format_date(packet[2])
@@ -286,11 +302,12 @@ class AmexTransaction(IIFTransaction):
         self.amount = packet[4]
         self.num = packet[5]
         self.receipt = packet[6]
-        self.CDate = packet[8]
+        self.CDate = format_date(packet[8])
         self.comments = packet[9]
         self.gl_in = packet[10]
-        self.job_in = packet[11]
+        self.job_in = format_one_job_number(packet[11])
         self.name_in = packet[12]
+        self.amex = amex
         self.split = self.null_clean(packet[14])
         self.qb_date = self.find_quickbooks_date(self.amex_date)
         self.TRNSTYPE = self.create_TRNSTYPE()
@@ -323,23 +340,39 @@ class AmexFactory(Factory):
         self.convert_trans_to_iif()
         self.publish()
         self.__str__()
-        self.text_to_columns()
+        #self.text_to_columns()
         self.qb_inputter()
-        open_file2('amex_prog')
+        #open_file2('amex_prog')
+
+    def get_options(self):
+        '''
+        Retrieves, cleans, removes duplicates, sorts, platinum and centurion folders' files.
+        Output is used to populat options memu for AmexFactory
+        '''
+        platinum_files = get_folder_contents('plat')
+        centurion_files = get_folder_contents('cent')
+        all_files = clean(platinum_files + centurion_files)
+        all_files2 = set([])
+        for file in all_files:
+            file_without_suffix = file[:7]
+            all_files2.add(file_without_suffix)
+        all_files3 = list(all_files2)
+        all_files3.sort(reverse=True)
+        return all_files3[:15]
 
     def select_amex(self):
         '''
         Opens window where user selects which Amex spreadsheet with provide source data.
         '''
-        options = amex_dict.keys()
+        options = self.get_options()
         window = SingleSelectionWindow(options)
         selected_option = window.selected_options[0]
-        selected_option = amex_dict[str(selected_option)]
+        selected_option = amex_filepath(selected_option)
         selected_option = str(selected_option) + '.xlsm'
         return selected_option
 
     def amex_pull(self, src):
-        amex_data = open_file(src,0,500)
+        amex_data = open_file(src,0,1000)
         del amex_data[0]
         return amex_data
 
@@ -364,7 +397,7 @@ class AmexFactory(Factory):
         output_list = []
         for row in self.data:
             if row[0] in self.accts:
-                transaction = AmexTransaction(row)
+                transaction = AmexTransaction(row, self.amex)
                 output_list.append(transaction)
         return output_list
 
@@ -442,5 +475,6 @@ class AmexFactory(Factory):
         print 'The current QuickBooks closing date is: ', QUICKBOOKS_CLOSING_DATE.strftime('%m/%d/%Y')
         print '================================================================================'
 
-
-
+@logger
+def amex_factory():
+    AmexFactory()

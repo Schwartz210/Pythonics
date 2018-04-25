@@ -3,24 +3,29 @@ from xlrd import xldate_as_tuple
 from datetime import datetime
 from spreadsheet import open_file
 from folder_contents import financial
-from mydatabases import names, jobs, clients, general_ledger
+from sql_time import pull_data, exists
 
-QUICKBOOKS_CLOSING_DATE = datetime.strptime('06/01/2016', '%m/%d/%Y')
+QUICKBOOKS_CLOSING_DATE = datetime.strptime('03/01/2018', '%m/%d/%Y')
 
 
 class SuperTransaction(object):
     '''
     This class is not an actual transaction. It has methods associated with various types of transactions.
     This class is designed purely to pass inheritance to child classes, which actually represent transactions.
-    The methods here are designed for the broadest possilbe useages.
+    The methods here are designed for the broadest possible useages.
     '''
     def __init__(self):
-        pass
+        self.missing_job = False
 
     def str_format(self, input):
         string = str(input)
         if string.find('.') > 0:
             string = string.strip('.0')
+        more_zeros = 4 - len(string)
+        for _ in range(more_zeros):
+            string += '0'
+        if string == '0000':
+            return None
         return string
 
     def format_date(self, date):
@@ -38,58 +43,83 @@ class SuperTransaction(object):
         '''
         Returns a person's full name, and QB class based on Amex name.
         '''
-        for record in names:
-            if record[2] == person:
-                return record[0], record[1]
-        return 'ERROR', 'ERROR'
+        sql_request = 'SELECT Full, Quickbooks FROM names WHERE Airline="%s"' % (person)
+        if exists(sql_request):
+            data = pull_data(sql_request)
+            return data[0]
+        raise Exception('Add %s to the Name-Class Array' % (person))
 
     def find_person_class(self, person):
         '''
         Returns a person's QB class based on full name
         '''
-        if person == None: return None
-        for record in names:
-            if record[0] == person:
-                return record[1]
+        sql_request = 'SELECT quickbooks FROM names WHERE full="%s"' % (person)
+        if exists(sql_request):
+            data = pull_data(sql_request)
+            return data[0][0]
         return 'ERROR'
 
     def find_full_job_name(self, job_in):
         '''
         Converts short job name --> long job name
-        EXAMPLE: "P6189" --> "KEM-P6189 Job name"
+        EXAMPLE: "P6189" --> "KEM-P6189 Norco bioequivalence"
         '''
-        if job_in == '-':
+        if job_in == '-': return None
+        sql_request = 'SELECT full FROM jobs WHERE number="%s"' % (job_in)
+        if exists(sql_request):
+            data = pull_data(sql_request)
+            return data[0][0]
+        else:
             return None
-        for record in jobs:
-            if self.str_format(record[0]) == self.str_format(job_in):
-                return record[1]
-        return None
+
+    def find_full_job_name_from_short(self, short_job):
+        '''
+        Converts short job name --> long job name
+        EXAMPLE: "KEM-P6189" --> "KEM-P6189 Norco bioequivalence"
+        '''
+        if short_job == '-': return None
+        sql_request = 'SELECT full FROM jobs WHERE Short="%s"' % (short_job)
+        if exists(sql_request):
+            data = pull_data(sql_request)
+            return data[0][0]
+        else:
+            return None
 
     def find_short_job(self, job_in):
-        for record in jobs:
-            if self.str_format(record[0]) == job_in:
-                return record[4]
+        sql_request = 'SELECT short FROM jobs WHERE number="%s"' % (job_in)
+        if exists(sql_request):
+            data = pull_data(sql_request)
+            return data[0][0]
+        else:
+            self.missing_job = job_in
+            return None
 
     def find_client(self, full_job):
         '''
         Determines which client a job is associated with based on prefix.
         '''
         if full_job:
-            for record in clients:
-                if record[0] == full_job[:3]:
-                    return record[1]
+            sql_request = 'SELECT full FROM clients WHERE short="%s"' % (full_job[:3])
+            if exists(sql_request):
+                data = pull_data(sql_request)
+                return data[0][0]
 
     def create_gl_out(self, gl_in, client):
         '''
         This method returns a string that is the final input into QB
         EXAMPLE: 'Fees' and 'XYZ Pharma' --> 'Meeting Costs:Fees:XYZ Pharma'
         '''
-        for record in general_ledger:
-            if record[0] == gl_in:
-                if client:
-                    return record[1] + client    #for COGS accounts
-                else:
-                    return record[1]      #for non-COGS accounts
+        if gl_in == '':
+            return None
+        sql_request = 'SELECT full FROM general_ledger WHERE short="%s"' % (gl_in)
+        data = pull_data(sql_request)
+        if not data:
+            raise Exception('GL issue with ', gl_in)
+        gl_full = data[0][0]
+        if client:
+            return gl_full + client
+        else:
+            return gl_full
 
     def create_job_out(self, full_job, gl_in):
         '''
@@ -97,8 +127,12 @@ class SuperTransaction(object):
         EX: "CYN6002 National Scientific Ad Board:Ground"
         '''
         if full_job:
-            try: return str(full_job) + str(':') + gl_in
-            except: print "There is an issue with this job: ", full_job
+            try:
+                return str(full_job) + str(':') + str(gl_in)
+            except:
+                print "There may be an issue with this job: ", full_job
+                print "Or there may be issue with this gl: ", gl_in
+                print 'Or it may be the fault of a combo: ', str(full_job) + str(':') + str(gl_in)
         else:
             return None
 
@@ -139,7 +173,7 @@ class SuperTransaction(object):
         Factory for instances of 'Vendor' class
         '''
         filepath = financial + r'\Avi\Address.xlsx'
-        data = open_file(filepath,1,15000)
+        data = open_file(filepath,1,16000)
         all_names = []
         for record in data:
             all_names.append(record[0])
@@ -148,7 +182,8 @@ class SuperTransaction(object):
             obj = Vendor(data[idx])
             return obj
         else:
-            return 'ERROR: Record not found'
+            raise Exception('ERROR: Record not found: ', self.vendor_name)
+
 
 class Vendor(object):
     '''
