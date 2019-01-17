@@ -57,7 +57,6 @@ def setup_argparse():
         Data validation for bool passed in a string. Sets global variable dry_run
         '''
         global dry_run
-        print(dryrun, type(dryrun))
         if dryrun.upper() == 'TRUE':
             dry_run = True
         elif dryrun.upper()  == 'FALSE':
